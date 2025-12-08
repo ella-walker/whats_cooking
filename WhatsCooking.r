@@ -27,69 +27,6 @@ ingredient_counts <- train %>%
 # view(ingredient_counts)
 long <- train %>% unnest(ingredients)
 
-##### CODE FROM JULIA ######
-all_cuisines <- unique(long$cuisine)
-
-overall_counts <- long %>%
-  count(ingredients, name = "count_overall")
-
-enrichment_all <- map_dfr(all_cuisines, function(cui) {
-  
-  target_counts <- long %>%
-    filter(cuisine == cui) %>%
-    count(ingredients, name = "count_in_cuisine")
-  
-  left_join(target_counts, overall_counts, by = "ingredients") %>%
-    mutate(
-      cuisine = cui,
-      ratio = count_in_cuisine / count_overall,
-      weighted_count_ratio = count_in_cuisine * ratio
-    ) %>%
-    arrange(desc(weighted_count_ratio))
-})
-
-enrichment_deduplicate <- enrichment_all %>%
-  group_by(ingredients) %>%
-  slice_max(weighted_count_ratio, n = 1, with_ties = FALSE) %>%
-  ungroup()
-
-top500 <- enrichment_deduplicate %>%
-  group_by(cuisine) %>%
-  arrange(desc(weighted_count_ratio)) %>%
-  mutate(global_rank = row_number()) %>%
-  slice_head(n = 500) %>%
-  ungroup()
-
-test_long <- test %>% unnest(ingredients)
-# Join test ingredients to the ranked predictors
-match_table <- test_long %>%
-  inner_join(top500, by = "ingredients")
-
-best_match <- match_table %>%
-  arrange(id, global_rank, cuisine) %>%   # break ties deterministically
-  group_by(id) %>%
-  slice(1) %>% 
-  ungroup() %>%
-  select(id, predicted_cuisine = cuisine)
-
-all_cuisines <- unique(train$cuisine)
-
-missing_ids <- setdiff(test$id, best_match$id)
-
-random_assign <- tibble(
-  id = missing_ids,
-  predicted_cuisine = sample(all_cuisines, length(missing_ids), replace = TRUE)
-)
-
-final_predictions <- bind_rows(best_match, random_assign)
-
-submission <- final_predictions %>%
-  arrange(id) %>%
-  select(id, cuisine = predicted_cuisine)
-
-write_csv(submission,
-          "~/Documents/STAT 348/whats_cooking/preds.csv")
-
 
 #### TF-IDF ####
 trainSet <- trainSet |>
@@ -102,6 +39,7 @@ cooking_recipe <- recipe(cuisine ~ ingredients, data = trainSet) |>
   step_mutate(ingredients = tokenlist(ingredients)) |>
   step_tokenfilter(ingredients, max_tokens=2500) |>
   step_tfidf(ingredients)
+
 
 # MODEL (no tuning)
 random_forest_mod <- rand_forest(
@@ -134,3 +72,101 @@ final_submission <- testSet |>
 vroom_write(final_submission,
             file = "~/Documents/STAT 348/whats_cooking/random_forest_2.csv",
             delim = ",")
+
+
+
+
+
+
+
+
+
+
+# Code from Danika
+train_long <- trainSet %>% unnest(ingredients)
+test_long  <- testSet %>% unnest(ingredients)
+
+unique_ingredients <- train_long %>%
+  mutate(ingredient = str_to_lower(ingredients)) %>%
+  
+  # Count cuisines per ingredient
+  distinct(cuisine, ingredient) %>%
+  count(ingredient, name = "num_cuisines") %>% 
+  filter(num_cuisines == 1) %>%     # keep only ingredients appearing in exactly one cuisine
+  
+  # Join back to get the cuisine info
+  inner_join(
+    train_long %>%
+      mutate(ingredient = str_to_lower(ingredients)) %>%
+      distinct(cuisine, ingredient),
+    by = "ingredient"
+  ) %>%
+  
+  # Add the number of unique recipe IDs containing this ingredient
+  left_join(
+    train_long %>%
+      mutate(ingredient = str_to_lower(ingredients)) %>%
+      group_by(ingredient) %>%
+      summarise(num_recipes = n_distinct(id), .groups = "drop"),
+    by = "ingredient"
+  ) %>%
+  
+  arrange(cuisine, ingredient)
+
+
+train_prepped <- trainSet %>% 
+  mutate(ingredient_text = map_chr(ingredients, ~ paste(tolower(.x), collapse = " ")))
+
+test_prepped <- testSet %>% 
+  mutate(ingredient_text = map_chr(ingredients, ~ paste(tolower(.x), collapse = " ")))
+
+
+cooking_recipe <- recipe(cuisine ~ ingredient_text, data = train_prepped) %>%
+  step_tokenize(ingredient_text) %>%
+  step_stopwords(ingredient_text) %>%
+  step_tokenfilter(ingredient_text, max_tokens = 2000) %>%
+  step_tf(ingredient_text)
+
+# -------------------------------
+# Random Forest Model
+# -------------------------------
+random_forest_mod <- rand_forest(
+  mtry = 5,
+  min_n = 5,
+  trees = 500
+) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# -------------------------------
+# Workflow
+# -------------------------------
+random_forest_wf <- workflow() %>%
+  add_recipe(cooking_recipe) %>%
+  add_model(random_forest_mod)
+
+# -------------------------------
+# Fit Final Model
+# -------------------------------
+random_forest_final <- random_forest_wf %>%
+  fit(data = train_prepped)
+
+# -------------------------------
+# Predict on Test Data
+# -------------------------------
+random_forest_preds <- predict(random_forest_final, new_data = test_prepped)
+
+# -------------------------------
+# Create Kaggle Submission
+# -------------------------------
+final_submission <- test_prepped %>%
+  select(id) %>%
+  bind_cols(random_forest_preds) %>%
+  rename(cuisine = .pred_class)
+
+# Save CSV
+vroom_write(
+  final_submission,
+  file = "~/Documents/STAT 348/whats_cooking/random_forest_unique.csv",
+  delim = ","
+)
