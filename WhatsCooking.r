@@ -21,11 +21,11 @@ testSet <- read_file("~/Documents/STAT 348/whats_cooking/whats-cooking/test.json
 # trainSet has columns: id, cuisine, ingredients (list-column)
 
 # Clean data
-ingredient_counts <- train %>%
+ingredient_counts <- trainSet %>%
   unnest(ingredients) %>%
   count(ingredients, sort = TRUE)
 # view(ingredient_counts)
-long <- train %>% unnest(ingredients)
+long <- trainSet %>% unnest(ingredients)
 
 
 #### TF-IDF ####
@@ -43,8 +43,8 @@ cooking_recipe <- recipe(cuisine ~ ingredients, data = trainSet) |>
 
 # MODEL (no tuning)
 random_forest_mod <- rand_forest(
-  mtry = 5,        # pick a fixed value
-  min_n = 5,       # pick a fixed value
+  mtry = 5,    
+  min_n = 5,
   trees = 500
 ) |>
   set_engine("ranger") |>
@@ -124,49 +124,45 @@ test_prepped <- testSet %>%
 cooking_recipe <- recipe(cuisine ~ ingredient_text, data = train_prepped) %>%
   step_tokenize(ingredient_text) %>%
   step_stopwords(ingredient_text) %>%
-  step_tokenfilter(ingredient_text, max_tokens = 2000) %>%
+  step_tokenfilter(ingredient_text, max_tokens = 1000) %>%
   step_tf(ingredient_text)
 
 # -------------------------------
-# Random Forest Model
+# Multinomial Logistic Regression Model
 # -------------------------------
-random_forest_mod <- rand_forest(
-  mtry = 5,
-  min_n = 5,
-  trees = 500
-) %>%
-  set_engine("ranger") %>%
+logistic_mod <- multinom_reg(penalty = 1e-4) %>%  # optional small regularization
+  set_engine("glmnet") %>%
   set_mode("classification")
 
 # -------------------------------
 # Workflow
 # -------------------------------
-random_forest_wf <- workflow() %>%
+logistic_wf <- workflow() %>%
   add_recipe(cooking_recipe) %>%
-  add_model(random_forest_mod)
+  add_model(logistic_mod)
 
 # -------------------------------
 # Fit Final Model
 # -------------------------------
-random_forest_final <- random_forest_wf %>%
+logistic_final <- logistic_wf %>%
   fit(data = train_prepped)
 
 # -------------------------------
 # Predict on Test Data
 # -------------------------------
-random_forest_preds <- predict(random_forest_final, new_data = test_prepped)
+logistic_preds <- predict(logistic_final, new_data = test_prepped)
 
 # -------------------------------
 # Create Kaggle Submission
 # -------------------------------
 final_submission <- test_prepped %>%
   select(id) %>%
-  bind_cols(random_forest_preds) %>%
+  bind_cols(logistic_preds) %>%
   rename(cuisine = .pred_class)
 
 # Save CSV
 vroom_write(
   final_submission,
-  file = "~/Documents/STAT 348/whats_cooking/random_forest_unique.csv",
+  file = "~/Documents/STAT 348/whats_cooking/logistic.csv",
   delim = ","
 )
